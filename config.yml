@@ -1,0 +1,49 @@
+server:
+  host: "127.0.0.1"
+  port: 8810
+
+proxy:
+  socks: "socks5://172.21.0.1:1080"
+
+logging:
+  # Override with NEXUS_AI_ROUTER_LOG env var
+  file: ""
+
+providers:
+  ollama:
+    endpoint: "http://localhost:11434/v1"
+    key: "ollama"
+    model: "llama3"
+    enabled: true
+    is_local: true
+  merlin:
+    # Merlin Pro puppet layer — run: python merlin_api.py --serve
+    endpoint: "http://127.0.0.1:8811/v1"
+    key: "merlin-local"
+    model: "gemini-3.1-pro"
+    enabled: true
+    is_local: true
+  openai:
+    endpoint: "https://api.openai.com/v1"
+    key: "sk-REPLACE_ME"
+    model: "gpt-4o"
+    enabled: false
+    is_local: false
+  anthropic:
+    endpoint: "https://api.anthropic.com/v1"
+    key: "sk-ant-REPLACE_ME"
+    model: "claude-3-5-sonnet-20240620"
+    enabled: false
+    is_local: false
+  mistral:
+    endpoint: "https://api.mistral.ai/v1"
+    key: "REPLACE_ME"
+    model: "mistral-large-latest"
+    enabled: false
+    is_local: false
+  groq:
+    endpoint: "https://api.groq.com/openai/v1"
+    key: "gsk_REPLACE_ME"
+    model: "llama3-70b-8192"
+    enabled: false
+    is_local: false

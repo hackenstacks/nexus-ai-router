@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.env.local
+nexus.env
+*.log
+*.db
+*.sqlite
+/merlin.json
+/venv/
+/.venv/
