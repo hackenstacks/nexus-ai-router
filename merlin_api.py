@@ -245,7 +245,7 @@ def chat(prompt: str, model: str = None, deep_research: bool = False,
         cfg = load_config()
 
     token = get_access_token(cfg)
-    uid   = cfg.get("merlin_id") or cfg.get("uid") or os.environ.get("MERLIN_UID", "")
+    uid   = cfg.get("uid") or cfg.get("merlin_id") or os.environ.get("MERLIN_UID", "")
     model = model or cfg.get("default_model", "gpt-6-luna")
 
     chat_id  = str(uuid.uuid4())
@@ -339,7 +339,7 @@ def generate_image(prompt: str, model: str = "dall-e-3", size: str = "1024x1024"
     if cfg is None:
         cfg = load_config()
     token = get_access_token(cfg)
-    uid   = cfg.get("merlin_id") or cfg.get("uid") or os.environ.get("MERLIN_UID", "")
+    uid   = cfg.get("uid") or cfg.get("merlin_id") or os.environ.get("MERLIN_UID", "")
     chat_id  = str(uuid.uuid4())
     msg_id   = str(uuid.uuid4())
     child_id = str(uuid.uuid4())
