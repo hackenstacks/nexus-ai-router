@@ -29,19 +29,35 @@ FIREBASE_KEY     = "AIzaSyAvCgtQ4XbmlQGIynDT-v_M8eLaXrKmtiM"  # public project I
 
 BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
-LIBREWOLF_COOKIES_DB = os.path.expanduser(
-    "~/.config/librewolf/librewolf/zqiwk7i6.default-release/cookies.sqlite"
-)
+def _find_librewolf_cookies() -> str:
+    """Locate LibreWolf cookies.sqlite — env var override, then glob."""
+    env = os.environ.get("LIBREWOLF_COOKIES_DB")
+    if env:
+        return env
+    import glob
+    # standard LibreWolf profile locations
+    patterns = [
+        os.path.expanduser("~/.librewolf/**/cookies.sqlite"),
+        os.path.expanduser("~/.config/librewolf/**/*.default*/cookies.sqlite"),
+        os.path.expanduser("~/.config/librewolf/librewolf/*.default*/cookies.sqlite"),
+    ]
+    for pat in patterns:
+        hits = glob.glob(pat, recursive=True)
+        if hits:
+            return hits[0]
+    return ""
 
 def _load_browser_cookies() -> dict:
     """Extract all Merlin cookies from LibreWolf — always re-copies for freshness."""
     import shutil, sqlite3 as _sq
+    db = _find_librewolf_cookies()
+    if not db:
+        return {}
     tmp = "/tmp/_merlin_cookies.sqlite"
     try:
-        shutil.copy2(LIBREWOLF_COOKIES_DB, tmp)
+        shutil.copy2(db, tmp)
         con = _sq.connect(tmp)
         cur = con.cursor()
-        # grab ALL merlin-domain cookies (getmerlin.in + session.getmerlin.in)
         cur.execute("SELECT name, value FROM moz_cookies WHERE host LIKE '%merlin%'")
         cookies = {n: v for n, v in cur.fetchall()}
         con.close()
@@ -136,7 +152,12 @@ def get_access_token(cfg: dict) -> str:
 # ── SSE parser ────────────────────────────────────────────────────────────────
 
 def _parse_sse(raw: str) -> dict:
-    """Parse Merlin's SSE stream → dict with 'data.message.content' text."""
+    """Parse Merlin's SSE stream → dict with assistant text.
+
+    Merlin event shape (actual):
+      data: {"data": {"data": {"text": "chunk", "eventType": "CONTENT_CHUNK"}, ...}}
+    The content lives at ev["data"]["data"]["text"].
+    """
     chunks = []
     error  = None
     for line in raw.splitlines():
@@ -149,20 +170,52 @@ def _parse_sse(raw: str) -> dict:
             ev = json.loads(payload)
         except Exception:
             continue
-        # error event
-        if ev.get("type") == "INTERNAL_SERVER_ERROR" or "error" in str(ev.get("message", "")).lower():
+
+        # error events
+        ev_type = ev.get("type", "")
+        if ev_type == "INTERNAL_SERVER_ERROR":
             error = ev.get("message", str(ev))
             continue
-        # content chunk
-        data = ev.get("data", ev)
-        if isinstance(data, dict):
-            content = data.get("content", "")
-            if content and data.get("eventType") != "DONE":
-                chunks.append(content)
+
+        outer = ev.get("data", {})
+        if not isinstance(outer, dict):
+            continue
+
+        # primary path: data.data.text
+        inner = outer.get("data", {})
+        if isinstance(inner, dict):
+            text    = inner.get("text", "")
+            ev_type = inner.get("eventType", outer.get("eventType", ""))
+            if text and ev_type not in ("DONE", "ERROR"):
+                chunks.append(text)
+                continue
+
+        # fallback path: data.content or data.text
+        text    = outer.get("content", outer.get("text", ""))
+        ev_type = outer.get("eventType", "")
+        if text and ev_type not in ("DONE", "ERROR"):
+            chunks.append(text)
+
     text = "".join(chunks).strip()
     if not text and error:
         raise RuntimeError(f"Merlin error: {error}")
     return {"data": {"message": {"content": text}}, "status": "ok"}
+
+
+# ── gravity_context ────────────────────────────────────────────────────────────
+
+# Default context sent when no captured value is stored.
+# Mirrors what the Merlin browser extension sends from the chat page.
+_DEFAULT_GRAVITY = {
+    "tabUrl":       "https://www.getmerlin.in/chat",
+    "tabTitle":     "Merlin | #1 AI Assistant",
+    "selectedText": "",
+    "activeTab":    True,
+}
+
+def _load_gravity_context(cfg: dict) -> dict:
+    """Return stored gravity_context or the safe default."""
+    return cfg.get("gravity_context") or _DEFAULT_GRAVITY
 
 # ── Core chat ──────────────────────────────────────────────────────────────────
 
@@ -187,7 +240,7 @@ def chat(prompt: str, model: str = None, deep_research: bool = False,
         "attachments":     [],
         "chatId":          chat_id,
         "sessionId":       chat_id,
-        "gravity_context": {},
+        "gravity_context": _load_gravity_context(cfg),
         "device": {
             "browser":         "web",
             "device_type":     "desktop",
@@ -226,11 +279,10 @@ def chat(prompt: str, model: str = None, deep_research: bool = False,
     req     = urllib.request.Request(url, data=data, method="POST", headers=headers)
 
     with urllib.request.urlopen(req, timeout=60) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
+        raw          = resp.read().decode("utf-8", errors="replace")
+        content_type = resp.headers.get("Content-Type", "")
 
-    # Endpoint returns SSE — parse events and collect content chunks
-    content_type = ""
-    if "text/event-stream" in str(getattr(resp, "headers", "")):
+    if "text/event-stream" in content_type or raw.startswith("data:"):
         return _parse_sse(raw)
 
     # Fallback: plain JSON
@@ -292,7 +344,7 @@ def generate_image(prompt: str, model: str = "dall-e-3", size: str = "1024x1024"
         "attachments":     [],
         "chatId":          chat_id,
         "sessionId":       chat_id,
-        "gravity_context": {},
+        "gravity_context": _load_gravity_context(cfg),
         "device": {
             "browser": "web", "device_type": "desktop",
             "language": "en-US", "locale": "en-US",
@@ -427,9 +479,33 @@ def init_config():
     cfg["uid"]           = input("Paste your Merlin UID:           ").strip()
     cfg["default_model"] = input("Default model [gemini-3.1-pro]:  ").strip() \
                            or "gemini-3.1-pro"
+    print("\n[gravity_context] — optional but recommended.")
+    print("  Capture from LibreWolf DevTools → Network → POST unified → Request Body.")
+    print("  Paste the gravity_context JSON value, or press Enter to use default.")
+    raw_gc = input("  gravity_context JSON [skip]: ").strip()
+    if raw_gc:
+        try:
+            cfg["gravity_context"] = json.loads(raw_gc)
+            print("  gravity_context stored.")
+        except Exception:
+            print("  Invalid JSON — skipped, will use default.")
     save_config(cfg)
     print(f"\nSaved. Firebase key auto-loaded.")
     print(f"Test: python merlin_api.py \"Hello Merlin\"")
+    print(f"Set gravity later: python merlin_api.py --set-gravity '{{...json...}}'")
+
+
+def set_gravity(raw_json: str):
+    """Store a captured gravity_context value in config."""
+    try:
+        gc = json.loads(raw_json)
+    except Exception as e:
+        print(f"Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    cfg = load_config()
+    cfg["gravity_context"] = gc
+    save_config(cfg)
+    print(f"gravity_context saved to {CONFIG_FILE}")
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -444,8 +520,13 @@ def main():
     parser.add_argument("--init",    action="store_true", help="Run setup wizard")
     parser.add_argument("--models",  action="store_true", help="List known models")
     parser.add_argument("--serve",   action="store_true", help="Run OpenAI-compat server")
-    parser.add_argument("--port",    type=int, default=8811, help="Server port (default 8811)")
+    parser.add_argument("--port",        type=int, default=8811, help="Server port (default 8811)")
+    parser.add_argument("--set-gravity", metavar="JSON",         help="Store gravity_context from captured DevTools request body")
     args = parser.parse_args()
+
+    if args.set_gravity:
+        set_gravity(args.set_gravity)
+        return
 
     if args.init:
         init_config()
