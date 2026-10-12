@@ -162,9 +162,10 @@ def get_access_token(cfg: dict) -> str:
 def _parse_sse(raw: str) -> dict:
     """Parse Merlin's SSE stream → dict with assistant text.
 
-    Merlin event shape (actual):
-      data: {"data": {"data": {"text": "chunk", "eventType": "CONTENT_CHUNK"}, ...}}
-    The content lives at ev["data"]["data"]["text"].
+    Actual event shapes observed:
+      content chunk: data: {"data": {"type": "text", "text": "Hi", "content": "", "index": N}}
+      done sentinel: data: {"data": {"content": " ", "eventType": "DONE"}}
+      progress:      data: {"data": {"type": "progress", ...}}
     """
     chunks = []
     error  = None
@@ -179,30 +180,21 @@ def _parse_sse(raw: str) -> dict:
         except Exception:
             continue
 
-        # error events
-        ev_type = ev.get("type", "")
-        if ev_type == "INTERNAL_SERVER_ERROR":
+        if ev.get("type") == "INTERNAL_SERVER_ERROR":
             error = ev.get("message", str(ev))
             continue
 
-        outer = ev.get("data", {})
-        if not isinstance(outer, dict):
+        d = ev.get("data", {})
+        if not isinstance(d, dict):
             continue
 
-        # primary path: data.data.text
-        inner = outer.get("data", {})
-        if isinstance(inner, dict):
-            text    = inner.get("text", "")
-            ev_type = inner.get("eventType", outer.get("eventType", ""))
-            if text and ev_type not in ("DONE", "ERROR"):
-                chunks.append(text)
-                continue
+        if d.get("eventType") == "DONE":
+            continue
 
-        # fallback path: data.content or data.text
-        text    = outer.get("content", outer.get("text", ""))
-        ev_type = outer.get("eventType", "")
-        if text and ev_type not in ("DONE", "ERROR"):
-            chunks.append(text)
+        if d.get("type") == "text":
+            text = d.get("text", "")
+            if text:
+                chunks.append(text)
 
     text = "".join(chunks).strip()
     if not text and error:
