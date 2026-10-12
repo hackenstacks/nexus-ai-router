@@ -67,18 +67,26 @@ def _load_browser_cookies() -> dict:
 
 def _build_headers(token: str, extra_cookies: dict = None) -> dict:
     """Build browser-like headers that pass Cloudflare."""
+    import datetime as _dt
     cookies = _load_browser_cookies()
     if extra_cookies:
         cookies.update(extra_cookies)
     cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00[Atlantic/Reykjavik]"
     return {
-        "Authorization":   f"Bearer {token}",
-        "Content-Type":    "application/json",
-        "Accept":          "application/json",
-        "User-Agent":      BROWSER_UA,
-        "Referer":         "https://www.getmerlin.in/chat",
-        "Origin":          "https://www.getmerlin.in",
-        "Cookie":          cookie_str,
+        "Authorization":      f"Bearer {token}",
+        "Content-Type":       "application/json",
+        "Accept":             "text/event-stream, text/event-stream",
+        "Accept-Language":    "en-US,en;q=0.9",
+        "User-Agent":         BROWSER_UA,
+        "Referer":            "https://www.getmerlin.in/chat",
+        "Origin":             "https://www.getmerlin.in",
+        "Cookie":             cookie_str,
+        "x-merlin-version":   "web-merlin",
+        "x-request-timestamp": ts,
+        "Sec-Fetch-Dest":     "empty",
+        "Sec-Fetch-Mode":     "cors",
+        "Sec-Fetch-Site":     "same-origin",
     }
 
 KNOWN_MODELS = [
@@ -204,18 +212,30 @@ def _parse_sse(raw: str) -> dict:
 
 # ── gravity_context ────────────────────────────────────────────────────────────
 
-# Default context sent when no captured value is stored.
-# Mirrors what the Merlin browser extension sends from the chat page.
-_DEFAULT_GRAVITY = {
-    "tabUrl":       "https://www.getmerlin.in/chat",
-    "tabTitle":     "Merlin | #1 AI Assistant",
-    "selectedText": "",
-    "activeTab":    True,
+# Device fingerprint default — matches captured LibreWolf request on this node.
+# gravity_context is built dynamically per-request (sessionId + user are injected).
+_DEFAULT_GRAVITY_DEVICE = {
+    "ua":             "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "browser":        "web",
+    "device_type":    "desktop",
+    "timezone":       "Atlantic/Reykjavik",
+    "locale":         "en-US",
+    "language":       "en-US",
+    "screen_width":   1600,
+    "screen_height":  600,
+    "viewport_width": 1600,
+    "viewport_height":600,
+    "platform":       "Linux x86_64",
 }
 
-def _load_gravity_context(cfg: dict) -> dict:
-    """Return stored gravity_context or the safe default."""
-    return cfg.get("gravity_context") or _DEFAULT_GRAVITY
+def _build_gravity_context(cfg: dict, uid: str, session_id: str) -> dict:
+    """Build gravity_context per-request — sessionId matches chatId, device from config."""
+    device = cfg.get("gravity_device") or _DEFAULT_GRAVITY_DEVICE
+    return {
+        "sessionId": session_id,
+        "user":      {"id": uid},
+        "device":    device,
+    }
 
 # ── Core chat ──────────────────────────────────────────────────────────────────
 
@@ -225,9 +245,8 @@ def chat(prompt: str, model: str = None, deep_research: bool = False,
         cfg = load_config()
 
     token = get_access_token(cfg)
-    # merlin_id is the Merlin UUID (different from Firebase uid — use this in request body)
     uid   = cfg.get("merlin_id") or cfg.get("uid") or os.environ.get("MERLIN_UID", "")
-    model = model or cfg.get("default_model", "gemini-3.1-pro")
+    model = model or cfg.get("default_model", "gpt-6-luna")
 
     chat_id  = str(uuid.uuid4())
     msg_id   = str(uuid.uuid4())
@@ -237,25 +256,9 @@ def chat(prompt: str, model: str = None, deep_research: bool = False,
 
     auto_mode = (model in (None, "auto", "merlin-auto"))
     body = {
-        "attachments":     [],
-        "chatId":          chat_id,
-        "sessionId":       chat_id,
-        "gravity_context": _load_gravity_context(cfg),
-        "device": {
-            "browser":         "web",
-            "device_type":     "desktop",
-            "language":        "en-US",
-            "locale":          "en-US",
-            "platform":        "Linux x86_64",
-            "screen_height":   900,
-            "screen_width":    1920,
-            "timezone":        "UTC",
-            "ua":              "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/109.0",
-            "viewport_height": 900,
-            "viewport_width":  1920,
-        },
-        "language": "AUTO",
-        "user":     {"id": uid},
+        "attachments": [],
+        "chatId":      chat_id,
+        "language":    "AUTO",
         "message": {
             "childId":  child_id,
             "content":  prompt,
@@ -264,14 +267,15 @@ def chat(prompt: str, model: str = None, deep_research: bool = False,
             "parentId": "root",
         },
         "metadata": {
-            "deepResearch":  deep_research,
-            "isWebpageChat": False,
-            "merlinMagic":   auto_mode,   # true = Merlin picks best model automatically
             "noTask":        True,
+            "isWebpageChat": False,
+            "deepResearch":  deep_research,
             "proFinderMode": False,
+            "merlinMagic":   auto_mode,
         },
         "mode":  "UNIFIED_CHAT",
-        "model": model if not auto_mode else cfg.get("default_model", "gemini-3.1-pro"),
+        "model": model if not auto_mode else cfg.get("default_model", "gpt-6-luna"),
+        "gravity_context": _build_gravity_context(cfg, uid, chat_id),
     }
 
     data    = json.dumps(body).encode()
@@ -335,38 +339,27 @@ def generate_image(prompt: str, model: str = "dall-e-3", size: str = "1024x1024"
     if cfg is None:
         cfg = load_config()
     token = get_access_token(cfg)
-    uid   = cfg.get("uid") or os.environ.get("MERLIN_UID", "")
+    uid   = cfg.get("merlin_id") or cfg.get("uid") or os.environ.get("MERLIN_UID", "")
     chat_id  = str(uuid.uuid4())
     msg_id   = str(uuid.uuid4())
     child_id = str(uuid.uuid4())
 
     body = {
-        "attachments":     [],
-        "chatId":          chat_id,
-        "sessionId":       chat_id,
-        "gravity_context": _load_gravity_context(cfg),
-        "device": {
-            "browser": "web", "device_type": "desktop",
-            "language": "en-US", "locale": "en-US",
-            "platform": "Linux x86_64",
-            "screen_height": 900, "screen_width": 1920,
-            "timezone": "UTC",
-            "ua": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/109.0",
-            "viewport_height": 900, "viewport_width": 1920,
-        },
-        "language": "AUTO",
-        "user":     {"id": uid},
+        "attachments": [],
+        "chatId":      chat_id,
+        "language":    "AUTO",
         "message": {
             "childId": child_id, "content": prompt,
             "context": "", "id": msg_id, "parentId": "root",
         },
         "metadata": {
-            "deepResearch": False, "isWebpageChat": False,
-            "merlinMagic": False, "noTask": True, "proFinderMode": False,
+            "noTask": True, "isWebpageChat": False,
+            "deepResearch": False, "proFinderMode": False, "merlinMagic": False,
         },
-        "mode":  "UNIFIED_CHAT",
-        "model": model,
+        "mode":         "UNIFIED_CHAT",
+        "model":        model,
         "imageOptions": {"size": size, "n": n},
+        "gravity_context": _build_gravity_context(cfg, uid, chat_id),
     }
 
     data    = json.dumps(body).encode()
@@ -496,16 +489,18 @@ def init_config():
 
 
 def set_gravity(raw_json: str):
-    """Store a captured gravity_context value in config."""
+    """Store device fingerprint from a captured gravity_context object."""
     try:
         gc = json.loads(raw_json)
     except Exception as e:
         print(f"Invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
+    # Accept either the full gravity_context object or just the device sub-object
+    device = gc.get("device", gc)
     cfg = load_config()
-    cfg["gravity_context"] = gc
+    cfg["gravity_device"] = device
     save_config(cfg)
-    print(f"gravity_context saved to {CONFIG_FILE}")
+    print(f"gravity_device saved ({len(device)} fields) → {CONFIG_FILE}")
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
